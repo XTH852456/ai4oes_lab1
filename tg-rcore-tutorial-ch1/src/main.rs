@@ -1,3 +1,104 @@
+
+#![no_std]
+#![no_main]
+
+// 【查询 SBI 显卡信息】这是 RISC-V 显卡标准调用
+use core::arch::asm;
+fn sbi_get_fb_addr() -> usize {
+    let addr: usize;
+    unsafe { asm!("ecall", in("a7") 0x42000, in("a6") 0x0, lateout("a0") addr); }
+    addr
+}
+
+#[no_mangle]
+fn main() -> ! {
+    // 【关键！】打印显卡地址
+    let fb_addr = sbi_get_fb_addr();
+    loop {
+        // 死循环打印，确保你能看到
+        println!("FRAMEBUFFER = {:#x}", fb_addr);
+    }
+}
+
+
+use core::ptr::write_volatile;
+
+const WIDTH: usize = 1280;
+const HEIGHT: usize = 720;
+const FRAMEBUFFER: usize = 0x80200000; // 这是 QEMU RISC-V 显卡的默认地址
+
+const COLOR_BLACK: u32   = 0x00000000;
+const COLOR_RED: u32     = 0x00FF0000;
+const COLOR_GREEN: u32   = 0x0000FF00;
+const COLOR_BLUE: u32    = 0x0000FFFF;
+const COLOR_YELLOW: u32  = 0x00FFFF00;
+const COLOR_PURPLE: u32  = 0x00FF00FF;
+const COLOR_CYAN: u32    = 0x0000FFFF;
+const COLOR_ORANGE: u32  = 0x00FF8000;
+
+const TANGRAM_O: [[i32; 5]; 7] = [
+    [200, 100, 200, 20, COLOR_RED as i32],
+    [200, 280, 200, 20, COLOR_RED as i32],
+    [190, 100, 20, 200, COLOR_GREEN as i32],
+    [390, 100, 20, 200, COLOR_GREEN as i32],
+    [220, 120, 160, 40, COLOR_BLUE as i32],
+    [220, 220, 160, 40, COLOR_BLUE as i32],
+    [280, 160, 40, 80, COLOR_YELLOW as i32],
+];
+
+const TANGRAM_S: [[i32; 5]; 7] = [
+    [600, 100, 160, 20, COLOR_PURPLE as i32],
+    [600, 180, 160, 20, COLOR_ORANGE as i32],
+    [600, 260, 160, 20, COLOR_BLUE as i32],
+    [590, 100, 20, 100, COLOR_RED as i32],
+    [750, 180, 20, 100, COLOR_GREEN as i32],
+    [620, 140, 60, 20, COLOR_YELLOW as i32],
+    [690, 220, 60, 20, COLOR_ORANGE as i32],
+];
+
+fn draw_rect(x: i32, y: i32, w: i32, h: i32, color: u32) {
+    for dy in 0..h {
+        for dx in 0..w {
+            let px = x + dx;
+            let py = y + dy;
+            if px >= 0 && px < WIDTH as i32 && py >= 0 && py < HEIGHT as i32 {
+                let off = (py as usize * WIDTH + px as usize) * 4;
+                unsafe {
+                    write_volatile((FRAMEBUFFER + off) as *mut u32, color);
+                }
+            }
+        }
+    }
+}
+
+fn clear_screen() {
+    draw_rect(0, 0, WIDTH as i32, HEIGHT as i32, COLOR_BLACK);
+}
+
+fn draw_tangram(shape: &[[i32; 5]; 7]) {
+    for piece in shape {
+        let x = piece[0];
+        let y = piece[1];
+        let w = piece[2];
+        let h = piece[3];
+        let color = piece[4] as u32;
+        draw_rect(x, y, w, h, color);
+    }
+}
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {}
+}
+
+#[unsafe(no_mangle)]
+fn main() -> ! {
+    clear_screen();
+    draw_tangram(&TANGRAM_O);
+    draw_tangram(&TANGRAM_S);
+    loop {}
+}
+
 // //! # 第一章：应用程序与基本执行环境
 // //!
 // //! 本章实现了一个最简单的 RISC-V S 态裸机程序，展示操作系统的最小执行环境。
