@@ -3,11 +3,6 @@ use std::{collections::HashMap, env, fs, path::PathBuf, process::Command};
 
 const TARGET_ARCH: &str = "riscv64gc-unknown-none-elf";
 
-// 以下三项均从 .cargo/config.toml [env] 节读取，不再硬编码：
-//   TG_USER_CRATE     — crates.io 包名
-//   TG_USER_LOCAL_DIR — 本地缓存目录名
-//   TG_USER_VERSION   — 版本号
-
 #[derive(Deserialize, Default)]
 struct Cases {
     base: Option<u64>,
@@ -18,11 +13,11 @@ struct Cases {
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=LOG");
-    println!("cargo:rerun-if-env-changed=TG_CH2_CASES");
     println!("cargo:rerun-if-env-changed=TG_USER_DIR");
+    println!("cargo:rerun-if-env-changed=TG_USER_VERSION");
     println!("cargo:rerun-if-env-changed=TG_USER_CRATE");
     println!("cargo:rerun-if-env-changed=TG_USER_LOCAL_DIR");
-    println!("cargo:rerun-if-env-changed=TG_USER_VERSION");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_EXERCISE");
 
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
 
@@ -42,9 +37,7 @@ fn should_skip_build_apps() -> bool {
         return true;
     }
 
-    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let manifest_dir = manifest_dir.to_string_lossy();
-    manifest_dir.contains("/target/package/") || manifest_dir.contains("\\target\\package\\")
+    is_packaged_build()
 }
 
 fn write_linker() {
@@ -53,6 +46,19 @@ fn write_linker() {
         panic!("failed to write linker script to {}: {}", ld.display(), err)
     });
     println!("cargo:rustc-link-arg=-T{}", ld.display());
+}
+
+fn is_packaged_build() -> bool {
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let out_dir = out_dir.to_string_lossy();
+
+    let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let manifest_dir = manifest_dir.to_string_lossy();
+
+    out_dir.contains("/target/package/")
+        || out_dir.contains("\\target\\package\\")
+        || manifest_dir.contains("/target/package/")
+        || manifest_dir.contains("\\target\\package\\")
 }
 
 fn build_apps() {
@@ -69,25 +75,18 @@ fn build_apps() {
         panic!("failed to parse cases.toml: {err}")
     });
 
-    let case_group = env::var("TG_CH2_CASES").unwrap_or_else(|_| "ch2".to_string());
-    println!("cargo:rustc-env=TG_CH2_SELECTED_CASES={case_group}");
-    let cases = cases_map.remove(&case_group).unwrap_or_else(|| {
-        panic!(
-            "no user cases found for {} in {}",
-            case_group,
-            cases_path.display()
-        )
-    });
+    let case_key = if env::var("CARGO_FEATURE_EXERCISE").is_ok() {
+        "ch3_exercise"
+    } else {
+        "ch3"
+    };
+    let cases = cases_map.remove(case_key).unwrap_or_default();
     let base = cases.base.unwrap_or(0);
     let step = cases.step.unwrap_or(0);
     let names = cases.cases.unwrap_or_default();
 
     if names.is_empty() {
-        panic!(
-            "user case group {} is empty in {}",
-            case_group,
-            cases_path.display()
-        );
+        panic!("no user cases found for {case_key} in {}", cases_path.display());
     }
 
     let target_dir = tg_user_root.join("target").join(TARGET_ARCH).join("debug");
@@ -277,7 +276,9 @@ fn ensure_workspace_table(dir: &PathBuf) {
     let cargo_toml = dir.join("Cargo.toml");
     let content = fs::read_to_string(&cargo_toml).unwrap_or_default();
     if !content.contains("[workspace]") {
-        fs::write(&cargo_toml, format!("{}\n[workspace]\n", content))
+        fs::write(&cargo_toml, format!("{}
+[workspace]
+", content))
             .unwrap_or_else(|err| panic!("failed to patch Cargo.toml in {}: {}", dir.display(), err));
     }
 }

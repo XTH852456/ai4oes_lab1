@@ -331,62 +331,6 @@ name = "threads_arg"
 path = "src/bin/threads_arg.rs"
 
 [[bin]]
-name = "20tangram_o_1"
-path = "src/bin/20tangram_o_1.rs"
-
-[[bin]]
-name = "21tangram_o_2"
-path = "src/bin/21tangram_o_2.rs"
-
-[[bin]]
-name = "22tangram_o_3"
-path = "src/bin/22tangram_o_3.rs"
-
-[[bin]]
-name = "23tangram_o_4"
-path = "src/bin/23tangram_o_4.rs"
-
-[[bin]]
-name = "24tangram_o_5"
-path = "src/bin/24tangram_o_5.rs"
-
-[[bin]]
-name = "25tangram_o_6"
-path = "src/bin/25tangram_o_6.rs"
-
-[[bin]]
-name = "26tangram_o_7"
-path = "src/bin/26tangram_o_7.rs"
-
-[[bin]]
-name = "27tangram_s_1"
-path = "src/bin/27tangram_s_1.rs"
-
-[[bin]]
-name = "28tangram_s_2"
-path = "src/bin/28tangram_s_2.rs"
-
-[[bin]]
-name = "29tangram_s_3"
-path = "src/bin/29tangram_s_3.rs"
-
-[[bin]]
-name = "30tangram_s_4"
-path = "src/bin/30tangram_s_4.rs"
-
-[[bin]]
-name = "31tangram_s_5"
-path = "src/bin/31tangram_s_5.rs"
-
-[[bin]]
-name = "32tangram_s_6"
-path = "src/bin/32tangram_s_6.rs"
-
-[[bin]]
-name = "33tangram_s_7"
-path = "src/bin/33tangram_s_7.rs"
-
-[[bin]]
 name = "user_shell"
 path = "src/bin/user_shell.rs"
 

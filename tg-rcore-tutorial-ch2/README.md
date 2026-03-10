@@ -144,6 +144,8 @@ cd tg-rcore-tutorial-ch2
 
 ## 二、编译与运行
 
+本仓库当前默认将 ch2 的批处理队列切换为 tangram 演示：内核会按 14 个用户程序顺序运行，分 7 批渲染字母 O，再分 7 批渲染字母 S。每个批次都会输出一张累计画布，新增的拼片使用字母 `A` 到 `G` 标识。如果 QEMU 提供了 ramfb framebuffer，内核还会同步把当前批次画到图形窗口里。
+
 ### 2.1 编译
 
 在 `tg-rcore-tutorial-ch2`（或 `tg-rcore-tutorial-ch2`）目录下执行：
@@ -163,6 +165,7 @@ cargo build
 > - `TG_USER_DIR`：指定本地 tg-rcore-tutorial-user 源码路径（跳过自动下载）
 > - `TG_USER_VERSION`：指定 tg-rcore-tutorial-user 版本（默认 `0.2.0-preview.1`）
 > - `TG_SKIP_USER_APPS`：设置后跳过用户程序编译（生成空的占位 APP_ASM）
+> - `TG_CH2_CASES`：选择 `cases.toml` 中的打包组；默认 `ch2`（tangram 演示），`ch2_base` 为基础测试用例
 > - `LOG`：设置日志级别（如 `LOG=INFO`、`LOG=TRACE`）
 
 ### 2.2 运行
@@ -170,6 +173,32 @@ cargo build
 ```bash
 cargo run
 ```
+
+默认输出为 tangram 演示批次。如果要回到教材原始的基础用户程序集合，可执行：
+
+```bash
+TG_CH2_CASES=ch2_base cargo run
+```
+
+如果要通过 GPU framebuffer 查看图形窗口，需要给 QEMU 增加 ramfb 设备。仓库已提供脚本：
+
+```bash
+./run-gui.sh
+```
+
+它等价于：
+
+```bash
+qemu-system-riscv64 \
+       -machine virt \
+       -bios none \
+       -device ramfb \
+       -serial stdio \
+       -display sdl \
+       -kernel target/riscv64gc-unknown-none-elf/debug/tg-rcore-tutorial-ch2
+```
+
+如果串口里看到 `framebuffer unavailable`，说明当前 QEMU 启动参数没有提供 ramfb，或者本机 QEMU 环境不支持这一路径。
 
 实际执行的 QEMU 命令等价于：
 
@@ -184,21 +213,25 @@ qemu-system-riscv64 \
 ### 2.3 预期输出
 
 ```
-[tg-rcore-tutorial-ch2 0.3.1-preview.1] Hello, world!
-[ INFO] .data [0x802xxxxx, 0x802xxxxx)
-[ WARN] boot_stack top=bottom=0x802xxxxx, lower_bound=0x802xxxxx
-[ERROR] .bss [0x802xxxxx, 0x802xxxxx)
-[ INFO] load app0 to 0x802xxxxx
-Hello world from user mode program!
+[ INFO] load app0 to 0x80400000
+================ Tangram O Batch 1/7 ================
+current piece: A
+pieces: A B C D E F G
+
+                      AAAA
+               AAAAAA
+
 [ INFO] app0 exit with code 0
 
-[ INFO] load app1 to 0x802xxxxx
-...（更多用户程序输出）...
+[ INFO] load app1 to 0x80400000
+================ Tangram O Batch 2/7 ================
+...（后续批次继续累积，最终渲染出 O 和 S）...
 ```
 
-批处理系统依次加载并运行每个用户程序：
-- 正常的用户程序会打印输出，然后通过 `exit` 系统调用退出
-- 出错的用户程序（如非法指令、访存错误）会被内核杀死，然后继续运行下一个
+批处理系统依次加载并运行多个 tangram 用户程序：
+- 正常的用户程序会打印当前批次的累计图案，然后通过 `exit` 系统调用退出
+- 默认共运行 14 个程序，前 7 个负责 O，后 7 个负责 S
+- 若切回 `TG_CH2_CASES=ch2_base`，则行为恢复为原始的基础测试程序集合
 
 ### 2.4 检查tg-ch2内核是否通过基础测试
 

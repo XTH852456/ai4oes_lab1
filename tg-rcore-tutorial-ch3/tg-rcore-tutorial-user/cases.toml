@@ -2,26 +2,6 @@
 base = 0x8040_0000
 step = 0
 cases = [
-    "20tangram_o_1",
-    "21tangram_o_2",
-    "22tangram_o_3",
-    "23tangram_o_4",
-    "24tangram_o_5",
-    "25tangram_o_6",
-    "26tangram_o_7",
-    "27tangram_s_1",
-    "28tangram_s_2",
-    "29tangram_s_3",
-    "30tangram_s_4",
-    "31tangram_s_5",
-    "32tangram_s_6",
-    "33tangram_s_7",
-]
-
-[ch2_base]
-base = 0x8040_0000
-step = 0
-cases = [
     "00hello_world",
     "01store_fault",
     "02power",

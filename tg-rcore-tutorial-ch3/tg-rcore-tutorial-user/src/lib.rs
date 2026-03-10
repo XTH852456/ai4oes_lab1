@@ -6,7 +6,6 @@
 //! - 其余辅助函数（sleep/pipe_*）展示了常见 syscall 组合用法。
 
 mod heap;
-pub mod tangram;
 
 extern crate alloc;
 

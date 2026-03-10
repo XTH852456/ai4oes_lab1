@@ -26,6 +26,9 @@
 // 非 RISC-V64 架构允许死代码（用于 cargo publish --dry-run 在主机上通过编译）
 #![cfg_attr(not(target_arch = "riscv64"), allow(dead_code))]
 
+use core::arch::asm;
+use core::ptr::write_volatile;
+
 // 引入控制台输出宏（print! / println!），由 tg_console 库提供
 #[macro_use]
 extern crate tg_console;
@@ -42,6 +45,40 @@ use tg_kernel_context::LocalContext;
 use tg_sbi;
 // 系统调用相关：调用者信息、系统调用 ID
 use tg_syscall::{Caller, SyscallId};
+
+const TANGRAM_CASE_GROUP: &str = "ch2";
+const FRAME_PAUSE_SPINS: usize = 30_000_000;
+const FINAL_PAUSE_SPINS: usize = 180_000_000;
+const FB_WIDTH: usize = 1280;
+const FB_HEIGHT: usize = 720;
+const COLOR_BLACK: u32 = 0x0014_1418;
+const COLOR_RED: u32 = 0x00d6_4b4b;
+const COLOR_BLUE: u32 = 0x0048_88d9;
+const COLOR_GREEN: u32 = 0x004e_bf85;
+const COLOR_GOLD: u32 = 0x00e2_b714;
+const COLOR_ORANGE: u32 = 0x00e2_8b38;
+const COLOR_CYAN: u32 = 0x003a_bdd6;
+const COLOR_PINK: u32 = 0x00d9_6ab3;
+
+const TANGRAM_O: [Rect; 7] = [
+    Rect::new(180, 120, 220, 28, COLOR_RED),
+    Rect::new(180, 332, 220, 28, COLOR_BLUE),
+    Rect::new(166, 120, 28, 240, COLOR_GREEN),
+    Rect::new(392, 120, 28, 240, COLOR_GOLD),
+    Rect::new(208, 152, 168, 44, COLOR_ORANGE),
+    Rect::new(208, 260, 168, 44, COLOR_CYAN),
+    Rect::new(268, 196, 52, 108, COLOR_PINK),
+];
+
+const TANGRAM_S: [Rect; 7] = [
+    Rect::new(650, 120, 180, 28, COLOR_RED),
+    Rect::new(650, 220, 180, 28, COLOR_ORANGE),
+    Rect::new(650, 320, 180, 28, COLOR_BLUE),
+    Rect::new(636, 120, 28, 128, COLOR_GREEN),
+    Rect::new(816, 220, 28, 128, COLOR_GOLD),
+    Rect::new(676, 168, 74, 32, COLOR_CYAN),
+    Rect::new(736, 268, 74, 32, COLOR_PINK),
+];
 
 // ========== 启动相关 ==========
 
@@ -72,6 +109,93 @@ unsafe extern "C" fn _start() -> ! {
     )
 }
 
+#[derive(Copy, Clone)]
+struct Rect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    color: u32,
+}
+
+impl Rect {
+    const fn new(x: i32, y: i32, width: i32, height: i32, color: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            color,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+struct FrameBuffer {
+    addr: usize,
+}
+
+impl FrameBuffer {
+    fn probe() -> Option<Self> {
+        let (err, addr) = sbi_get_fb_addr();
+        if err < 0 || addr == 0 {
+            None
+        } else {
+            Some(Self { addr })
+        }
+    }
+
+    fn clear(&self) {
+        self.draw_rect(Rect::new(0, 0, FB_WIDTH as i32, FB_HEIGHT as i32, COLOR_BLACK));
+    }
+
+    fn draw_rect(&self, rect: Rect) {
+        for dy in 0..rect.height {
+            for dx in 0..rect.width {
+                let px = rect.x + dx;
+                let py = rect.y + dy;
+                if px >= 0 && px < FB_WIDTH as i32 && py >= 0 && py < FB_HEIGHT as i32 {
+                    let offset = (py as usize * FB_WIDTH + px as usize) * 4;
+                    unsafe {
+                        write_volatile((self.addr + offset) as *mut u32, rect.color);
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_rects(&self, rects: &[Rect], count: usize) {
+        for rect in rects.iter().take(count.min(rects.len())) {
+            self.draw_rect(*rect);
+        }
+    }
+
+    fn draw_demo_frame(&self, app_index: usize) {
+        self.clear();
+        if app_index < 7 {
+            self.draw_rects(&TANGRAM_O, app_index + 1);
+        } else {
+            self.draw_rects(&TANGRAM_S, app_index - 6);
+        }
+    }
+}
+
+#[inline]
+fn sbi_get_fb_addr() -> (isize, usize) {
+    let err: isize;
+    let value: usize;
+    unsafe {
+        asm!(
+            "ecall",
+            inlateout("a0") 0usize => err,
+            inlateout("a1") 0usize => value,
+            in("a7") 0x42000usize,
+            in("a6") 0usize,
+        );
+    }
+    (err, value)
+}
+
 // ========== 内核主函数 ==========
 
 /// 内核主函数：初始化各子系统，然后以批处理方式依次运行所有用户程序。
@@ -88,10 +212,30 @@ extern "C" fn rust_main() -> ! {
     tg_syscall::init_io(&SyscallContext);
     tg_syscall::init_process(&SyscallContext);
 
+    let is_tangram_demo = option_env!("TG_CH2_SELECTED_CASES") == Some(TANGRAM_CASE_GROUP);
+    let framebuffer = if is_tangram_demo {
+        let fb = FrameBuffer::probe();
+        match fb {
+            Some(fb) => {
+                log::info!("framebuffer detected at {:#x}", fb.addr);
+                Some(fb)
+            }
+            None => {
+                log::warn!("framebuffer unavailable; falling back to console-only tangram output");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // 第四步：批处理——依次加载并运行每个用户程序
     for (i, app) in tg_linker::AppMeta::locate().iter().enumerate() {
         let app_base = app.as_ptr() as usize;
         log::info!("load app{i} to {app_base:#x}");
+        if let Some(fb) = framebuffer {
+            fb.draw_demo_frame(i);
+        }
 
         // 创建用户态上下文，入口地址为 app_base
         // LocalContext::user() 会设置 sstatus.SPP = User，
@@ -138,10 +282,24 @@ extern "C" fn rust_main() -> ! {
         // 防止编译器优化掉 user_stack
         let _ = core::hint::black_box(&user_stack);
         println!();
+        if is_tangram_demo {
+            pause_for_demo(FRAME_PAUSE_SPINS);
+        }
+    }
+
+    if is_tangram_demo {
+        println!("Tangram demo finished. Holding the last frame before shutdown...");
+        pause_for_demo(FINAL_PAUSE_SPINS);
     }
 
     // 所有用户程序执行完毕，关机
     tg_sbi::shutdown(false)
+}
+
+fn pause_for_demo(spins: usize) {
+    for _ in 0..spins {
+        core::hint::spin_loop();
+    }
 }
 
 // ========== panic 处理 ==========
