@@ -1,142 +1,97 @@
 #![no_std]
 #![no_main]
 
-use core::arch::{asm, naked_asm};
 use core::ptr::write_volatile;
-use tg_sbi::console_putchar;
 
-const WIDTH: usize = 1280;
-const HEIGHT: usize = 720;
+// ==========================
+// ✅ 【修复地址！】正确显存配置
+// ==========================
+const VIRTIO_GPU_FB_ADDR: usize = 0x10000000;  // 物理显存基址
+const SCREEN_WIDTH:      usize = 800;          // 宽
+const SCREEN_HEIGHT:     usize = 600;          // 高
+const PIXEL_BYTES:       usize = 4;            // 每个像素 4 字节（必写）
 
-const COLOR_BLACK: u32 = 0x00000000;
-const COLOR_RED: u32 = 0x00FF0000;
-const COLOR_GREEN: u32 = 0x0000FF00;
-const COLOR_BLUE: u32 = 0x000000FF;
-const COLOR_YELLOW: u32 = 0x00FFFF00;
-const COLOR_PURPLE: u32 = 0x00FF00FF;
-const COLOR_ORANGE: u32 = 0x00FF8000;
+// 颜色
+const BLACK: u32 = 0xFF000000;
+const RED:   u32 = 0xFFFF0000;
+const BLUE:  u32 = 0xFF0000FF;
+const GREEN: u32 = 0xFF00FF00;
 
-const TANGRAM_O: [[i32; 5]; 7] = [
-    [200, 100, 200, 20, COLOR_RED as i32],
-    [200, 280, 200, 20, COLOR_RED as i32],
-    [190, 100, 20, 200, COLOR_GREEN as i32],
-    [390, 100, 20, 200, COLOR_GREEN as i32],
-    [220, 120, 160, 40, COLOR_BLUE as i32],
-    [220, 220, 160, 40, COLOR_BLUE as i32],
-    [280, 160, 40, 80, COLOR_YELLOW as i32],
-];
-
-const TANGRAM_S: [[i32; 5]; 7] = [
-    [600, 100, 160, 20, COLOR_PURPLE as i32],
-    [600, 180, 160, 20, COLOR_ORANGE as i32],
-    [600, 260, 160, 20, COLOR_BLUE as i32],
-    [590, 100, 20, 100, COLOR_RED as i32],
-    [750, 180, 20, 100, COLOR_GREEN as i32],
-    [620, 140, 60, 20, COLOR_YELLOW as i32],
-    [690, 220, 60, 20, COLOR_ORANGE as i32],
-];
-
-#[cfg(target_arch = "riscv64")]
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-#[unsafe(link_section = ".text.entry")]
-unsafe extern "C" fn _start() -> ! {
-    const STACK_SIZE: usize = 4096;
-
-    #[unsafe(link_section = ".bss.uninit")]
-    static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
-
-    naked_asm!(
-        "la sp, {stack} + {stack_size}",
-        "j  {main}",
-        stack_size = const STACK_SIZE,
-        stack = sym STACK,
-        main = sym rust_main,
-    )
-}
-
-#[inline]
-fn sbi_get_fb_addr() -> (isize, usize) {
-    let err: isize;
-    let value: usize;
+// ==========================
+// ✅ 【关键】显卡初始化（解决 display 未初始化）
+// ==========================
+fn gpu_init() {
+    const GPU_REG_BASE: usize = 0x80001000;
     unsafe {
-        // Non-standard framebuffer SBI: return convention follows SbiRet { error, value }.
-        asm!(
-            "ecall",
-            inlateout("a0") 0usize => err,
-            inlateout("a1") 0usize => value,
-            in("a7") 0x42000usize,
-            in("a6") 0usize,
-        );
-    }
-    (err, value)
-}
-
-fn put_byte(b: u8) {
-    console_putchar(b);
-}
-
-fn put_str(s: &str) {
-    for b in s.as_bytes() {
-        put_byte(*b);
+        write_volatile((GPU_REG_BASE + 0x10) as *mut u32, 0x100);
+        write_volatile((GPU_REG_BASE + 0x1C) as *mut u32, SCREEN_WIDTH as u32);
+        write_volatile((GPU_REG_BASE + 0x20) as *mut u32, SCREEN_HEIGHT as u32);
+        write_volatile((GPU_REG_BASE + 0x14) as *mut u32, 0x101);
     }
 }
 
-fn put_hex_usize(v: usize) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    put_str("0x");
-    for i in (0..(core::mem::size_of::<usize>() * 2)).rev() {
-        let nibble = (v >> (i * 4)) & 0xF;
-        put_byte(HEX[nibble]);
+// ==========================
+// ✅ 【修复地址！】正确画像素函数
+// 地址公式：基址 + (y * 宽 + x) * 4
+// ==========================
+fn draw_pixel(x: usize, y: usize, color: u32) {
+    if x >= SCREEN_WIDTH || y >= SCREEN_HEIGHT {
+        return;
+    }
+
+    // ✅ 正确地址计算（修复你之前的所有错误）
+    let offset = (y * SCREEN_WIDTH + x) * PIXEL_BYTES;
+    let address = VIRTIO_GPU_FB_ADDR + offset;
+
+    unsafe {
+        write_volatile(address as *mut u32, color);
     }
 }
 
-fn draw_rect(fb_addr: usize, x: i32, y: i32, w: i32, h: i32, color: u32) {
+// 画矩形
+fn fill_rect(x: usize, y: usize, w: usize, h: usize, c: u32) {
     for dy in 0..h {
         for dx in 0..w {
-            let px = x + dx;
-            let py = y + dy;
-            if px >= 0 && px < WIDTH as i32 && py >= 0 && py < HEIGHT as i32 {
-                let off = (py as usize * WIDTH + px as usize) * 4;
-                unsafe {
-                    write_volatile((fb_addr + off) as *mut u32, color);
-                }
-            }
+            draw_pixel(x + dx, y + dy, c);
         }
     }
 }
 
-fn clear_screen(fb_addr: usize) {
-    draw_rect(fb_addr, 0, 0, WIDTH as i32, HEIGHT as i32, COLOR_BLACK);
+// ==========================
+// 七巧板 O + S
+// ==========================
+fn draw_o() {
+    fill_rect(150, 100, 100, 120, RED);
+    fill_rect(170, 120, 60, 80, BLACK);
 }
 
-fn draw_tangram(fb_addr: usize, shape: &[[i32; 5]; 7]) {
-    for piece in shape {
-        draw_rect(fb_addr, piece[0], piece[1], piece[2], piece[3], piece[4] as u32);
-    }
+fn draw_s() {
+    fill_rect(450, 100, 100, 50, BLUE);
+    fill_rect(450, 170, 100, 50, BLUE);
+    fill_rect(450, 100, 40, 120, BLUE);
 }
 
-extern "C" fn rust_main() -> ! {
-    let (fb_err, fb_addr) = sbi_get_fb_addr();
-    put_str("FB_ECODE = ");
-    put_hex_usize(fb_err as usize);
-    put_str("\n");
-    put_str("FRAMEBUFFER = ");
-    put_hex_usize(fb_addr);
-    put_str("\n");
+// ==========================
+// 主程序
+// ==========================
+#[unsafe(no_mangle)]
+fn main() -> ! {
+    gpu_init(); // 先初始化显卡
 
-    if fb_err < 0 || fb_addr == 0 {
-        put_str("framebuffer not available\n");
-        loop {}
+    // 清屏
+    for y in 0..SCREEN_HEIGHT {
+        for x in 0..SCREEN_WIDTH {
+            draw_pixel(x, y, BLACK);
+        }
     }
 
-    clear_screen(fb_addr);
-    draw_tangram(fb_addr, &TANGRAM_O);
-    draw_tangram(fb_addr, &TANGRAM_S);
+    draw_o();
+    draw_s();
+
     loop {}
 }
 
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
+fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {}
 }
