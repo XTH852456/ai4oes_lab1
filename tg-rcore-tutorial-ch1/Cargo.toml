@@ -51,6 +51,12 @@ version = "0.4.5"
 features = ["nobios"]
 package = "tg-rcore-tutorial-sbi"
 
+[dependencies.virtio-drivers]
+version = "0.7"
+
+[dependencies.linked_list_allocator]
+version = "0.10"
+
 [profile.dev]
 panic = "abort"
 

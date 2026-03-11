@@ -121,7 +121,8 @@ brew install qemu
 **验证安装：**
 
 ```bash
-qemu-system-riscv64 --version
+
+
 ```
 
 ### 1.4 获取源代码
@@ -170,8 +171,10 @@ cargo run
 ```bash
 qemu-system-riscv64 \
     -machine virt \
-    -nographic \
     -bios none \
+    -serial stdio \
+    -device virtio-gpu-device \
+    -display gtk,gl=off \
     -kernel target/riscv64gc-unknown-none-elf/debug/tg-rcore-tutorial-ch1
 ```
 
@@ -180,17 +183,20 @@ qemu-system-riscv64 \
 | 参数 | 说明 |
 |------|------|
 | `-machine virt` | 使用 QEMU 的 `virt` 虚拟平台，这是一个通用的 RISC-V 虚拟机 |
-| `-nographic` | 无图形界面，所有输出通过串口重定向到终端 |
 | `-bios none` | 不加载任何 BIOS/SBI 固件，tg-rcore-tutorial-ch1 自带 M-mode 启动代码 |
+| `-serial stdio` | 将串口日志输出到当前终端 |
+| `-device virtio-gpu-device` | 挂载 virtio-mmio GPU 设备，供 framebuffer 显示使用 |
+| `-display gtk,gl=off` | 使用 GTK 窗口显示图形并关闭 OpenGL，兼容性更好（无需 VNC） |
 | `-kernel <文件>` | 将 ELF 可执行文件加载到内存中作为内核启动 |
 
 ### 2.3 预期输出
 
 ```
-Hello, world!
+tg-rcore ch1 tangram demo start
+tangram O/S rendered on framebuffer
 ```
 
-输出一行 `Hello, world!` 后，QEMU 自动退出。这是因为程序通过 SBI 调用执行了关机操作。
+程序会保持运行以维持图形帧显示，不会自动退出。
 
 ---
 
@@ -394,8 +400,10 @@ target = "riscv64gc-unknown-none-elf"
 runner = [
     "qemu-system-riscv64",
     "-machine", "virt",
-    "-nographic",
     "-bios", "none",
+    "-serial", "stdio",
+    "-device", "virtio-gpu-device",
+    "-display", "gtk,gl=off",
     "-kernel",
 ]
 ```
