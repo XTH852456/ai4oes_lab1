@@ -10,7 +10,8 @@ cargo build
 qemu-system-riscv64 \
     -machine virt \
     -bios none \
-    -device ramfb \
+    -monitor none \
     -serial stdio \
-    -display sdl \
+    -device virtio-gpu-device,xres=1280,yres=720,max_outputs=1 \
+    -display gtk,gl=off \
     -kernel target/riscv64gc-unknown-none-elf/debug/tg-rcore-tutorial-ch2

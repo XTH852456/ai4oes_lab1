@@ -1,429 +1,371 @@
-//! # 第二章：批处理系统
-//!
-//! 本章在第一章"最小执行环境"的基础上，实现了一个**批处理操作系统**，
-//! 能够依次加载并运行多个用户程序。
-//!
-//! ## 核心概念
-//!
-//! - **批处理系统**：将多个用户程序打包，自动依次执行
-//! - **特权级切换**：U-mode（用户态）与 S-mode（内核态）之间的切换
-//! - **Trap 处理**：用户程序通过 `ecall` 触发系统调用，或因异常陷入内核
-//! - **上下文保存与恢复**：进入/退出 Trap 时保存/恢复用户寄存器状态
-//! - **系统调用**：`write`（输出）和 `exit`（退出）
-//!
-//! 教程阅读建议：
-//!
-//! - 先看 `rust_main` 的 for-loop：理解批处理“逐个装载、逐个执行”；
-//! - 再看 `handle_syscall`：理解 a7/a0-a5/a0 的系统调用寄存器约定；
-//! - 最后看 `impls`：把内核态 trait 接口与用户态 syscall 行为对齐起来。
+//! Chapter 2 kernel: batch system with trap/syscall handling and tangram demo.
 
-// 不使用标准库，裸机环境没有操作系统提供系统调用支持
 #![no_std]
-// 不使用标准入口，裸机环境没有 C runtime 进行初始化
 #![no_main]
-// RISC-V64 架构下启用严格警告和文档检查
 #![cfg_attr(target_arch = "riscv64", deny(warnings, missing_docs))]
-// 非 RISC-V64 架构允许死代码（用于 cargo publish --dry-run 在主机上通过编译）
 #![cfg_attr(not(target_arch = "riscv64"), allow(dead_code))]
 
 use core::arch::asm;
+use core::hint;
+use core::mem::MaybeUninit;
 use core::ptr::write_volatile;
 
-// 引入控制台输出宏（print! / println!），由 tg_console 库提供
 #[macro_use]
 extern crate tg_console;
 
-// 本地模块：Console 和 SyscallContext 的实现
 use impls::{Console, SyscallContext};
-// riscv 库：访问 RISC-V 控制状态寄存器（CSR），如 scause
-use riscv::register::*;
-// 日志模块
+use riscv::register::scause;
 use tg_console::log;
-// 用户上下文：保存/恢复用户态寄存器，实现特权级切换
 use tg_kernel_context::LocalContext;
-// SBI 调用：关机等
-use tg_sbi;
-// 系统调用相关：调用者信息、系统调用 ID
 use tg_syscall::{Caller, SyscallId};
 
 const TANGRAM_CASE_GROUP: &str = "ch2";
+const TANGRAM_PIECES: usize = 7;
 const FRAME_PAUSE_SPINS: usize = 30_000_000;
 const FINAL_PAUSE_SPINS: usize = 180_000_000;
+
 const FB_WIDTH: usize = 1280;
 const FB_HEIGHT: usize = 720;
-const COLOR_BLACK: u32 = 0x0014_1418;
-const COLOR_RED: u32 = 0x00d6_4b4b;
-const COLOR_BLUE: u32 = 0x0048_88d9;
-const COLOR_GREEN: u32 = 0x004e_bf85;
-const COLOR_GOLD: u32 = 0x00e2_b714;
-const COLOR_ORANGE: u32 = 0x00e2_8b38;
-const COLOR_CYAN: u32 = 0x003a_bdd6;
-const COLOR_PINK: u32 = 0x00d9_6ab3;
 
-const TANGRAM_O: [Rect; 7] = [
-    Rect::new(180, 120, 220, 28, COLOR_RED),
-    Rect::new(180, 332, 220, 28, COLOR_BLUE),
-    Rect::new(166, 120, 28, 240, COLOR_GREEN),
-    Rect::new(392, 120, 28, 240, COLOR_GOLD),
-    Rect::new(208, 152, 168, 44, COLOR_ORANGE),
-    Rect::new(208, 260, 168, 44, COLOR_CYAN),
-    Rect::new(268, 196, 52, 108, COLOR_PINK),
+const COLOR_BG: u32 = 0x0014_1418;
+const COLOR_RED: u32 = 0x00D6_4B4B;
+const COLOR_BLUE: u32 = 0x0048_88D9;
+const COLOR_GREEN: u32 = 0x004E_BF85;
+const COLOR_GOLD: u32 = 0x00E2_B714;
+const COLOR_ORANGE: u32 = 0x00E2_8B38;
+const COLOR_CYAN: u32 = 0x003A_BDD6;
+const COLOR_PINK: u32 = 0x00D9_6AB3;
+
+#[derive(Copy, Clone)]
+enum Shape {
+	O,
+	S,
+}
+
+#[derive(Copy, Clone)]
+struct Rect {
+	x: i32,
+	y: i32,
+	w: i32,
+	h: i32,
+	color: u32,
+}
+
+impl Rect {
+	const fn new(x: i32, y: i32, w: i32, h: i32, color: u32) -> Self {
+		Self { x, y, w, h, color }
+	}
+}
+
+#[derive(Copy, Clone)]
+struct TangramStage {
+	shape: Shape,
+	visible_pieces: usize,
+}
+
+const TANGRAM_O: [Rect; TANGRAM_PIECES] = [
+	Rect::new(180, 120, 220, 28, COLOR_RED),
+	Rect::new(180, 332, 220, 28, COLOR_BLUE),
+	Rect::new(166, 120, 28, 240, COLOR_GREEN),
+	Rect::new(392, 120, 28, 240, COLOR_GOLD),
+	Rect::new(208, 152, 168, 44, COLOR_ORANGE),
+	Rect::new(208, 260, 168, 44, COLOR_CYAN),
+	Rect::new(268, 196, 52, 108, COLOR_PINK),
 ];
 
-const TANGRAM_S: [Rect; 7] = [
-    Rect::new(650, 120, 180, 28, COLOR_RED),
-    Rect::new(650, 220, 180, 28, COLOR_ORANGE),
-    Rect::new(650, 320, 180, 28, COLOR_BLUE),
-    Rect::new(636, 120, 28, 128, COLOR_GREEN),
-    Rect::new(816, 220, 28, 128, COLOR_GOLD),
-    Rect::new(676, 168, 74, 32, COLOR_CYAN),
-    Rect::new(736, 268, 74, 32, COLOR_PINK),
+const TANGRAM_S: [Rect; TANGRAM_PIECES] = [
+	Rect::new(650, 120, 180, 28, COLOR_RED),
+	Rect::new(650, 220, 180, 28, COLOR_ORANGE),
+	Rect::new(650, 320, 180, 28, COLOR_BLUE),
+	Rect::new(636, 120, 28, 128, COLOR_GREEN),
+	Rect::new(816, 220, 28, 128, COLOR_GOLD),
+	Rect::new(676, 168, 74, 32, COLOR_CYAN),
+	Rect::new(736, 268, 74, 32, COLOR_PINK),
 ];
 
-// ========== 启动相关 ==========
-
-// 将用户程序的二进制数据内联到内核镜像的 .data 段中
-// APP_ASM 由 build.rs 在编译时生成，包含所有用户程序的二进制数据
 #[cfg(target_arch = "riscv64")]
 core::arch::global_asm!(include_str!(env!("APP_ASM")));
 
-// 定义内核入口点：设置 8 页（32 KiB）的内核栈，然后跳转到 rust_main。
-//
-// 这里不再调用 tg_linker::boot0! 宏，避免外部已发布版本与 Rust 2024
-// 在属性语义上的兼容差异影响本 crate 的发布校验。
 #[cfg(target_arch = "riscv64")]
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
 unsafe extern "C" fn _start() -> ! {
-    const STACK_SIZE: usize = 8 * 4096;
-    #[unsafe(link_section = ".boot.stack")]
-    static mut STACK: [u8; STACK_SIZE] = [0u8; STACK_SIZE];
+	const STACK_SIZE: usize = 8 * 4096;
+	#[unsafe(link_section = ".boot.stack")]
+	static mut STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
 
-    core::arch::naked_asm!(
-        "la sp, {stack} + {stack_size}",
-        "j  {main}",
-        stack = sym STACK,
-        stack_size = const STACK_SIZE,
-        main = sym rust_main,
-    )
-}
-
-#[derive(Copy, Clone)]
-struct Rect {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    color: u32,
-}
-
-impl Rect {
-    const fn new(x: i32, y: i32, width: i32, height: i32, color: u32) -> Self {
-        Self {
-            x,
-            y,
-            width,
-            height,
-            color,
-        }
-    }
+	core::arch::naked_asm!(
+		"la sp, {stack} + {stack_size}",
+		"j  {main}",
+		stack = sym STACK,
+		stack_size = const STACK_SIZE,
+		main = sym rust_main,
+	)
 }
 
 #[derive(Copy, Clone)]
 struct FrameBuffer {
-    addr: usize,
+	addr: usize,
 }
 
 impl FrameBuffer {
-    fn probe() -> Option<Self> {
-        let (err, addr) = sbi_get_fb_addr();
-        if err < 0 || addr == 0 {
-            None
-        } else {
-            Some(Self { addr })
-        }
-    }
+	fn probe() -> Option<Self> {
+		let (err, addr) = sbi_get_fb_addr();
+		if err < 0 || addr == 0 {
+			None
+		} else {
+			Some(Self { addr })
+		}
+	}
 
-    fn clear(&self) {
-        self.draw_rect(Rect::new(0, 0, FB_WIDTH as i32, FB_HEIGHT as i32, COLOR_BLACK));
-    }
+	fn clear(&self) {
+		self.draw_rect(Rect::new(0, 0, FB_WIDTH as i32, FB_HEIGHT as i32, COLOR_BG));
+	}
 
-    fn draw_rect(&self, rect: Rect) {
-        for dy in 0..rect.height {
-            for dx in 0..rect.width {
-                let px = rect.x + dx;
-                let py = rect.y + dy;
-                if px >= 0 && px < FB_WIDTH as i32 && py >= 0 && py < FB_HEIGHT as i32 {
-                    let offset = (py as usize * FB_WIDTH + px as usize) * 4;
-                    unsafe {
-                        write_volatile((self.addr + offset) as *mut u32, rect.color);
-                    }
-                }
-            }
-        }
-    }
+	fn draw_stage(&self, stage: TangramStage) {
+		self.clear();
+		let pieces = match stage.shape {
+			Shape::O => &TANGRAM_O,
+			Shape::S => &TANGRAM_S,
+		};
+		for rect in pieces.iter().take(stage.visible_pieces.min(pieces.len())) {
+			self.draw_rect(*rect);
+		}
+	}
 
-    fn draw_rects(&self, rects: &[Rect], count: usize) {
-        for rect in rects.iter().take(count.min(rects.len())) {
-            self.draw_rect(*rect);
-        }
-    }
+	fn draw_rect(&self, rect: Rect) {
+		for dy in 0..rect.h {
+			for dx in 0..rect.w {
+				let px = rect.x + dx;
+				let py = rect.y + dy;
+				if px < 0 || py < 0 || px >= FB_WIDTH as i32 || py >= FB_HEIGHT as i32 {
+					continue;
+				}
+				let offset = (py as usize * FB_WIDTH + px as usize) * 4;
+				unsafe {
+					write_volatile((self.addr + offset) as *mut u32, rect.color);
+				}
+			}
+		}
+	}
+}
 
-    fn draw_demo_frame(&self, app_index: usize) {
-        self.clear();
-        if app_index < 7 {
-            self.draw_rects(&TANGRAM_O, app_index + 1);
-        } else {
-            self.draw_rects(&TANGRAM_S, app_index - 6);
-        }
-    }
+#[inline]
+fn stage_for_app(app_index: usize) -> Option<TangramStage> {
+	if app_index < TANGRAM_PIECES {
+		Some(TangramStage {
+			shape: Shape::O,
+			visible_pieces: app_index + 1,
+		})
+	} else if app_index < TANGRAM_PIECES * 2 {
+		Some(TangramStage {
+			shape: Shape::S,
+			visible_pieces: app_index - TANGRAM_PIECES + 1,
+		})
+	} else {
+		None
+	}
 }
 
 #[inline]
 fn sbi_get_fb_addr() -> (isize, usize) {
-    let err: isize;
-    let value: usize;
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") 0usize => err,
-            inlateout("a1") 0usize => value,
-            in("a7") 0x42000usize,
-            in("a6") 0usize,
-        );
-    }
-    (err, value)
+	let err: isize;
+	let value: usize;
+	unsafe {
+		asm!(
+			"ecall",
+			inlateout("a0") 0usize => err,
+			inlateout("a1") 0usize => value,
+			in("a7") 0x42000usize,
+			in("a6") 0usize,
+		);
+	}
+	(err, value)
 }
 
-// ========== 内核主函数 ==========
-
-/// 内核主函数：初始化各子系统，然后以批处理方式依次运行所有用户程序。
+/// Kernel entry point.
 extern "C" fn rust_main() -> ! {
-    // 第一步：清零 BSS 段（未初始化的全局变量区域）
-    unsafe { tg_linker::KernelLayout::locate().zero_bss() };
+	unsafe { tg_linker::KernelLayout::locate().zero_bss() };
 
-    // 第二步：初始化控制台输出（使 print!/println! 可用）
-    tg_console::init_console(&Console);
-    tg_console::set_log_level(option_env!("LOG"));
-    tg_console::test_log();
+	tg_console::init_console(&Console);
+	tg_console::set_log_level(option_env!("LOG"));
+	tg_console::test_log();
 
-    // 第三步：初始化系统调用处理（注册 IO 和 Process 的实现）
-    tg_syscall::init_io(&SyscallContext);
-    tg_syscall::init_process(&SyscallContext);
+	tg_syscall::init_io(&SyscallContext);
+	tg_syscall::init_process(&SyscallContext);
 
-    let is_tangram_demo = option_env!("TG_CH2_SELECTED_CASES") == Some(TANGRAM_CASE_GROUP);
-    let framebuffer = if is_tangram_demo {
-        let fb = FrameBuffer::probe();
-        match fb {
-            Some(fb) => {
-                log::info!("framebuffer detected at {:#x}", fb.addr);
-                Some(fb)
-            }
-            None => {
-                log::warn!("framebuffer unavailable; falling back to console-only tangram output");
-                None
-            }
-        }
-    } else {
-        None
-    };
+	let tangram_enabled = option_env!("TG_CH2_SELECTED_CASES") == Some(TANGRAM_CASE_GROUP);
+	let framebuffer = if tangram_enabled {
+		match FrameBuffer::probe() {
+			Some(fb) => {
+				log::info!("framebuffer detected at {:#x}", fb.addr);
+				Some(fb)
+			}
+			None => {
+				log::warn!("framebuffer unavailable; fallback to console tangram output");
+				None
+			}
+		}
+	} else {
+		None
+	};
 
-    // 第四步：批处理——依次加载并运行每个用户程序
-    for (i, app) in tg_linker::AppMeta::locate().iter().enumerate() {
-        let app_base = app.as_ptr() as usize;
-        log::info!("load app{i} to {app_base:#x}");
-        if let Some(fb) = framebuffer {
-            fb.draw_demo_frame(i);
-        }
+	for (app_index, app) in tg_linker::AppMeta::locate().iter().enumerate() {
+		let app_base = app.as_ptr() as usize;
+		log::info!("load app{app_index} to {app_base:#x}");
 
-        // 创建用户态上下文，入口地址为 app_base
-        // LocalContext::user() 会设置 sstatus.SPP = User，
-        // 使得 sret 后 CPU 进入 U-mode
-        let mut ctx = LocalContext::user(app_base);
+		if tangram_enabled {
+			if let Some(stage) = stage_for_app(app_index) {
+				if let Some(fb) = framebuffer {
+					fb.draw_stage(stage);
+				}
+			}
+		}
 
-        // 分配用户栈（4 KiB），使用 MaybeUninit 避免不必要的零初始化
-        let mut user_stack: core::mem::MaybeUninit<[usize; 512]> =
-            core::mem::MaybeUninit::uninit();
-        let user_stack_ptr = user_stack.as_mut_ptr() as *mut usize;
-        // 将用户栈顶地址写入上下文的 sp 寄存器
-        *ctx.sp_mut() = unsafe { user_stack_ptr.add(512) } as usize;
+		run_user_app(app_index, app_base);
 
-        // 循环执行用户程序，直到退出或出错
-        loop {
-            // execute() 会：
-            // 1. 将当前上下文的寄存器恢复到 CPU
-            // 2. 执行 sret 切换到 U-mode 运行用户程序
-            // 3. 用户程序触发 Trap 后回到这里
-            unsafe { ctx.execute() };
+		println!();
+		if tangram_enabled && stage_for_app(app_index).is_some() {
+			pause(FRAME_PAUSE_SPINS);
+		}
+	}
 
-            // 读取 scause 寄存器判断 Trap 原因
-            use scause::{Exception, Trap};
-            match scause::read().cause() {
-                // 用户态系统调用（ecall from U-mode）
-                Trap::Exception(Exception::UserEnvCall) => {
-                    use SyscallResult::*;
-                    match handle_syscall(&mut ctx) {
-                        Done => continue,           // 系统调用处理完成，继续执行
-                        Exit(code) => log::info!("app{i} exit with code {code}"),
-                        Error(id) => {
-                            log::error!("app{i} call an unsupported syscall {}", id.0)
-                        }
-                    }
-                }
-                // 其他异常（如非法指令、页错误等）：杀死应用
-                trap => log::error!("app{i} was killed because of {trap:?}"),
-            }
-            // 清除指令缓存：因为下一个用户程序会被加载到相同的内存区域，
-            // 需要确保 i-cache 中不会残留旧的指令
-            unsafe { core::arch::asm!("fence.i") };
-            break;
-        }
-        // 防止编译器优化掉 user_stack
-        let _ = core::hint::black_box(&user_stack);
-        println!();
-        if is_tangram_demo {
-            pause_for_demo(FRAME_PAUSE_SPINS);
-        }
-    }
+	if tangram_enabled {
+		println!("Tangram demo finished. Holding final frame before shutdown...");
+		pause(FINAL_PAUSE_SPINS);
+	}
 
-    if is_tangram_demo {
-        println!("Tangram demo finished. Holding the last frame before shutdown...");
-        pause_for_demo(FINAL_PAUSE_SPINS);
-    }
-
-    // 所有用户程序执行完毕，关机
-    tg_sbi::shutdown(false)
+	tg_sbi::shutdown(false)
 }
 
-fn pause_for_demo(spins: usize) {
-    for _ in 0..spins {
-        core::hint::spin_loop();
-    }
+fn run_user_app(app_index: usize, app_base: usize) {
+	let mut ctx = LocalContext::user(app_base);
+
+	let mut user_stack: MaybeUninit<[usize; 512]> = MaybeUninit::uninit();
+	let user_stack_ptr = user_stack.as_mut_ptr() as *mut usize;
+	*ctx.sp_mut() = unsafe { user_stack_ptr.add(512) } as usize;
+
+	loop {
+		unsafe { ctx.execute() };
+
+		use scause::{Exception, Trap};
+		match scause::read().cause() {
+			Trap::Exception(Exception::UserEnvCall) => {
+				use SyscallResult::*;
+				match handle_syscall(&mut ctx) {
+					Done => continue,
+					Exit(code) => log::info!("app{app_index} exit with code {code}"),
+					Error(id) => log::error!("app{app_index} call an unsupported syscall {}", id.0),
+				}
+			}
+			trap => log::error!("app{app_index} was killed because of {trap:?}"),
+		}
+
+		unsafe { asm!("fence.i") };
+		break;
+	}
+
+	let _ = hint::black_box(&user_stack);
 }
 
-// ========== panic 处理 ==========
+fn pause(spins: usize) {
+	for _ in 0..spins {
+		hint::spin_loop();
+	}
+}
 
-/// panic 处理函数：打印错误信息后以异常状态关机。
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    println!("{info}");
-    tg_sbi::shutdown(true)
+	println!("{info}");
+	tg_sbi::shutdown(true)
 }
 
-// ========== 系统调用处理 ==========
-
-/// 系统调用处理结果
 enum SyscallResult {
-    /// 系统调用完成，继续执行用户程序
-    Done,
-    /// 用户程序请求退出，附带退出码
-    Exit(usize),
-    /// 不支持的系统调用
-    Error(SyscallId),
+	Done,
+	Exit(usize),
+	Error(SyscallId),
 }
 
-/// 处理系统调用。
-///
-/// 从用户上下文中提取系统调用 ID（a7 寄存器）和参数（a0-a5 寄存器），
-/// 分发到对应的处理函数，并将返回值写回 a0 寄存器。
 fn handle_syscall(ctx: &mut LocalContext) -> SyscallResult {
-    use tg_syscall::{SyscallId as Id, SyscallResult as Ret};
+	use tg_syscall::{SyscallId as Id, SyscallResult as Ret};
 
-    // a7 寄存器存放 syscall ID
-    let id = ctx.a(7).into();
-    // a0-a5 寄存器存放系统调用参数
-    let args = [ctx.a(0), ctx.a(1), ctx.a(2), ctx.a(3), ctx.a(4), ctx.a(5)];
+	let id = ctx.a(7).into();
+	let args = [ctx.a(0), ctx.a(1), ctx.a(2), ctx.a(3), ctx.a(4), ctx.a(5)];
 
-    match tg_syscall::handle(Caller { entity: 0, flow: 0 }, id, args) {
-        Ret::Done(ret) => match id {
-            Id::EXIT => SyscallResult::Exit(ctx.a(0)),
-            _ => {
-                // 将返回值写入 a0
-                *ctx.a_mut(0) = ret as _;
-                // sepc += 4，使 sret 后从 ecall 的下一条指令继续执行
-                ctx.move_next();
-                SyscallResult::Done
-            }
-        },
-        Ret::Unsupported(id) => SyscallResult::Error(id),
-    }
+	match tg_syscall::handle(Caller { entity: 0, flow: 0 }, id, args) {
+		Ret::Done(ret) => match id {
+			Id::EXIT => SyscallResult::Exit(ctx.a(0)),
+			_ => {
+				*ctx.a_mut(0) = ret as usize;
+				ctx.move_next();
+				SyscallResult::Done
+			}
+		},
+		Ret::Unsupported(id) => SyscallResult::Error(id),
+	}
 }
 
-// ========== 接口实现 ==========
-
-/// 各依赖库所需接口的具体实现
 mod impls {
-    use tg_syscall::{STDDEBUG, STDOUT};
+	use tg_syscall::{STDDEBUG, STDOUT};
 
-    /// 控制台实现：通过 SBI 逐字符输出
-    pub struct Console;
+	pub struct Console;
 
-    impl tg_console::Console for Console {
-        #[inline]
-        fn put_char(&self, c: u8) {
-            tg_sbi::console_putchar(c);
-        }
-    }
+	impl tg_console::Console for Console {
+		#[inline]
+		fn put_char(&self, c: u8) {
+			tg_sbi::console_putchar(c);
+		}
+	}
 
-    /// 系统调用上下文实现：处理 IO 和 Process 相关的系统调用
-    pub struct SyscallContext;
+	pub struct SyscallContext;
 
-    /// IO 系统调用实现：处理 write 系统调用
-    impl tg_syscall::IO for SyscallContext {
-        fn write(
-            &self,
-            _caller: tg_syscall::Caller,
-            fd: usize,
-            buf: usize,
-            count: usize,
-        ) -> isize {
-            match fd {
-                // 标准输出和调试输出：将缓冲区内容打印到控制台
-                STDOUT | STDDEBUG => {
-                    print!("{}", unsafe {
-                        core::str::from_utf8_unchecked(core::slice::from_raw_parts(
-                            buf as *const u8,
-                            count,
-                        ))
-                    });
-                    count as _
-                }
-                _ => {
-                    tg_console::log::error!("unsupported fd: {fd}");
-                    -1
-                }
-            }
-        }
-    }
+	impl tg_syscall::IO for SyscallContext {
+		fn write(
+			&self,
+			_caller: tg_syscall::Caller,
+			fd: usize,
+			buf: usize,
+			count: usize,
+		) -> isize {
+			match fd {
+				STDOUT | STDDEBUG => {
+					print!("{}", unsafe {
+						core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+							buf as *const u8,
+							count,
+						))
+					});
+					count as isize
+				}
+				_ => {
+					tg_console::log::error!("unsupported fd: {fd}");
+					-1
+				}
+			}
+		}
+	}
 
-    /// Process 系统调用实现：处理 exit 系统调用
-    impl tg_syscall::Process for SyscallContext {
-        #[inline]
-        fn exit(&self, _caller: tg_syscall::Caller, _status: usize) -> isize {
-            0
-        }
-    }
+	impl tg_syscall::Process for SyscallContext {
+		#[inline]
+		fn exit(&self, _caller: tg_syscall::Caller, _status: usize) -> isize {
+			0
+		}
+	}
 }
 
-/// 非 RISC-V64 架构的占位模块。
-///
-/// 提供编译所需的符号，使得 `cargo publish --dry-run` 在主机平台上能通过编译。
 #[cfg(not(target_arch = "riscv64"))]
 mod stub {
-    /// 主机平台占位入口
-    #[unsafe(no_mangle)]
-    pub extern "C" fn main() -> i32 {
-        0
-    }
+	#[unsafe(no_mangle)]
+	pub extern "C" fn main() -> i32 {
+		0
+	}
 
-    /// C 运行时占位
-    #[unsafe(no_mangle)]
-    pub extern "C" fn __libc_start_main() -> i32 {
-        0
-    }
+	#[unsafe(no_mangle)]
+	pub extern "C" fn __libc_start_main() -> i32 {
+		0
+	}
 
-    /// Rust 异常处理人格占位
-    #[unsafe(no_mangle)]
-    pub extern "C" fn rust_eh_personality() {}
+	#[unsafe(no_mangle)]
+	pub extern "C" fn rust_eh_personality() {}
 }
